@@ -47,3 +47,15 @@ python -m compileall -q pipeline.py incremental_kb tests
 
 See [docs/YJ_KB_CONSUMER_CONTRACT.md](docs/YJ_KB_CONSUMER_CONTRACT.md) for the release format.
 
+## Syncing to yj-kb
+
+The cleaner owns release synchronization. `scripts/sync_release.py` defaults to a read-only remote preflight. Only `--apply` stages an immutable version, verifies it on the host, switches `current`, and calls `/kb/reload`. If reload fails, it restores the previous pointer when available. It never deletes an old release.
+
+```bash
+python scripts/sync_release.py --version 1.0.1
+python scripts/sync_release.py --version 1.0.1 --apply
+python scripts/sync_release.py --rollback-to 1.0.0
+python scripts/sync_release.py --rollback-to 1.0.0 --apply
+```
+
+Do not run `--apply` until the server has the new yj-kb consumer code and `/kb/status` and `/kb/reload` are available. The default remote root is `/root/yj-kb/cleaner_releases`, deliberately separate from the older yj-kb bootstrap `kb_releases`; the default host is `root@bk.rcar.vip`. Override with `--host` for another authorized host.
