@@ -1,0 +1,20 @@
+{
+  "chunk_count": 645,
+  "embedding": {
+    "artifact": "external_regenerable",
+    "dimension": 2048,
+    "model": "embedding-3"
+  },
+  "files": {
+    "changelog.json": {
+      "sha256": "696757c21fbe9f69130627a1b57a497a93b0ce072b9756e1a4eb7aadf25ad9fe"
+    },
+    "chunks.jsonl": {
+      "sha256": "45bcf3333f6ca6132e689b07ab6bd0df13147de4f2281ea91f8c5afd4fddeeee"
+    }
+  },
+  "generated_at": "2026-09-15T06:29:38Z",
+  "release_version": "1.0.1",
+  "schema_version": "1.0.0",
+  "source_commit": "354afde7b659ebb53725d0d0b27a42439ce1f147"
+}
