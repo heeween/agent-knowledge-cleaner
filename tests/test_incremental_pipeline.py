@@ -63,6 +63,14 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM sources").fetchone()[0], 0)
 
+    def test_cli_dry_run_does_not_create_missing_state(self):
+        path = self.write("cli.md", chat("【2026-09-15 10:00】客户：如何导出客户？", "【2026-09-15 10:01】客服：点击导出并选择字段。"))
+        state = self.root / "missing.sqlite3"
+        command = [str(PROJECT / ".venv/bin/python"), str(PROJECT / "pipeline.py"), "--state", str(state), "ingest", str(path), "--dry-run"]
+        result = subprocess.run(command, cwd=PROJECT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(state.exists())
+
     def test_append_recomputes_overlap_and_cross_boundary_issue(self):
         path = self.write("append.md", chat("【2026-09-15 10:00】客户：如何配置短信签名？"))
         ingest(self.db, path, self.analyzer, overlap=30)
@@ -83,6 +91,19 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(deleted["summary"]["files_deleted"], 1)
         self.assertEqual(self.db.execute("SELECT status FROM sources").fetchone()[0], "deleted")
 
+    def test_source_change_invalidates_evidence_and_requires_revalidation(self):
+        self.db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
+            "KB-0646", 1, "active", "如何新增测试标签？", "在标签设置中新增并保存。", None, "fixture", "2026-09-15T00:00:00Z",
+        ))
+        self.db.commit()
+        path = self.write("evidence.md", chat("【2026-09-15 10:00】客户：如何新增测试标签？", "【2026-09-15 10:01】客服：在标签设置中新增并保存。"))
+        ingest(self.db, path, self.analyzer)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM evidence_links").fetchone()[0], 1)
+        path.write_text(chat("【2026-09-15 10:00】客户：如何新增测试标签？", "【2026-09-15 10:01】客服：在其他页面新增并保存。"), encoding="utf-8")
+        ingest(self.db, path, self.analyzer)
+        self.assertTrue(any(row["relation"] == "revalidation_required" for row in list_reviews(self.db)))
+        self.assertEqual(self.db.execute("SELECT question,answer FROM kb_revisions WHERE kb_id='KB-0646'").fetchone()["answer"], "在标签设置中新增并保存。")
+
     def test_exact_move_keeps_source_id(self):
         path = self.write("old.md", chat("【2026-09-15 10:00】客户：如何新增客户？", "【2026-09-15 10:01】客服：点击新增客户并保存。"))
         ingest(self.db, self.incoming, self.analyzer)
@@ -101,6 +122,15 @@ class PipelineTest(unittest.TestCase):
         result = ingest(self.db, path, self.analyzer)
         self.assertEqual(result["summary"]["knowledge_conflict"], 1)
         self.assertEqual(list_reviews(self.db)[0]["relation"], "conflict")
+
+    def test_invalidated_candidate_cannot_be_approved(self):
+        path = self.write("obsolete.md", chat("【2026-09-15 10:00】客户：怎么设置新的业务标签？", "【2026-09-15 10:01】客服：进入标签设置后新增并保存。"))
+        ingest(self.db, path, self.analyzer)
+        old_review = list_reviews(self.db)[0]["review_id"]
+        path.write_text(chat("【2026-09-15 10:00】客户：怎么设置新的业务标签？", "【2026-09-15 10:01】客服：进入其他设置后新增并保存。"), encoding="utf-8")
+        ingest(self.db, path, self.analyzer)
+        with self.assertRaises(ValueError):
+            decide_review(self.db, old_review, "approved")
 
     def test_stable_kb_id_allocation(self):
         for number in (1, 2):
@@ -126,6 +156,17 @@ class PipelineTest(unittest.TestCase):
         second = publish(self.db, repo, "1.0.1", embedding_model="mock", embedding_dimension=3)
         self.assertEqual((repo / "releases" / "current").resolve(), second.resolve())
         self.assertEqual(rollback(repo), "1.0.0")
+    def test_manifest_detects_tampering(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True)
+        release = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+        (release / "chunks.jsonl").write_text((release / "chunks.jsonl").read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_release(release)
 
 
 if __name__ == "__main__":

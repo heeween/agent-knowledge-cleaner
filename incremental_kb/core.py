@@ -52,8 +52,9 @@ def canonical_json(value: object) -> str:
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    if str(path) != ":memory:":
+        path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     db.executescript("""
@@ -206,6 +207,13 @@ def _source_plan(db: sqlite3.Connection, path: Path, root: Path, overlap: int, e
             "SELECT * FROM sources WHERE content_sha256=? AND status='active' AND path<>? ORDER BY processed_at LIMIT 1",
             (digest, str(path)),
         ).fetchone()
+    if explicit_source_id:
+        mapped = db.execute("SELECT * FROM sources WHERE source_id=?", (explicit_source_id,)).fetchone()
+        if mapped is None:
+            raise ValueError(f"unknown --source-id: {explicit_source_id}")
+        if existing and existing["source_id"] != explicit_source_id:
+            raise ValueError("--source-id conflicts with the registered path")
+        existing = existing or mapped
     source_id = explicit_source_id or (existing["source_id"] if existing else moved["source_id"] if moved else f"SRC-{uuid.uuid4().hex}")
     old_messages = []
     if existing or moved:
@@ -353,6 +361,9 @@ def decide_review(db: sqlite3.Connection, review_id: str, decision: str, note: s
         raise KeyError(review_id)
     if review["status"] != "pending":
         raise ValueError("review already decided")
+    issue_status = db.execute("SELECT status FROM issues WHERE issue_id=?", (review["issue_id"],)).fetchone()
+    if review["relation"] != "revalidation_required" and (not issue_status or issue_status["status"] != "active"):
+        raise ValueError("cannot approve a missing or invalidated issue")
     now = utc_now()
     with db:
         db.execute("UPDATE reviews SET status=?,decided_at=?,decision_note=? WHERE review_id=?",
@@ -388,7 +399,7 @@ def export_kb_registry(db: sqlite3.Connection, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as output:
         for row in db.execute("SELECT * FROM kb_revisions ORDER BY kb_id,revision"):
-            record = dict(row)
+            record = {key: row[key] for key in ("kb_id", "revision", "status", "supersedes", "provenance")}
             output.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
@@ -404,10 +415,18 @@ def git_commit(root: Path) -> str:
     return result.stdout.strip()
 
 
+def git_tracked_tree_clean(root: Path) -> bool:
+    result = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=root)
+    return result.returncode == 0
+
+
 def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model: str,
             embedding_dimension: int) -> Path:
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("release version must be SemVer, e.g. 1.0.0")
+    baseline = root / "output" / "kb_entries_official_v3.jsonl"
+    if baseline.exists() and sha256_file(baseline) != "f57b19feb7f6a6e118e7ab48737d54ce2f59d56a70c1f2fea9e274076561c51f":
+        raise ValueError("frozen baseline changed; publish refused")
     releases = root / "releases"
     target = releases / version
     if target.exists():
@@ -418,7 +437,12 @@ def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model
     active = active_kb(db)
     if not active or active[0]["kb_id"] != "KB-0001":
         raise ValueError("active KB snapshot is invalid")
+    frozen = [row for row in active if int(row["kb_id"][3:]) <= 645]
+    if len(frozen) != 645 or any(row["kb_id"] != f"KB-{index:04d}" or row["revision"] != 1 for index, row in enumerate(frozen, 1)):
+        raise ValueError("frozen KB identity/revision guard failed")
     source_commit = git_commit(root)
+    if not git_tracked_tree_clean(root):
+        raise RuntimeError("publish requires committed tracked source changes")
     releases.mkdir(parents=True, exist_ok=True)
     temp = Path(tempfile.mkdtemp(prefix=f".{version}-", dir=releases))
     try:

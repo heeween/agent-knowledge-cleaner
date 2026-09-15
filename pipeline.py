@@ -23,8 +23,11 @@ def print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def open_state(path: Path):
-    db = connect(path)
+def open_state(path: Path, *, dry_run: bool = False):
+    if dry_run and not path.exists():
+        db = connect(Path(":memory:"))
+    else:
+        db = connect(path)
     bootstrap_baseline(db, BASELINE)
     return db
 
@@ -74,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             print_json({"current_release": rollback(ROOT, args.version)})
             return 0
 
-        db = open_state(args.state.resolve())
+        db = open_state(args.state.resolve(), dry_run=args.command == "ingest" and args.dry_run)
         if args.command == "init":
             export_kb_registry(db, KB_REGISTRY)
             print_json({"state": str(args.state.resolve()), "baseline_entries": 645, "kb_registry": str(KB_REGISTRY)})
