@@ -113,6 +113,17 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(result["summary"]["files_moved"], 1)
         self.assertEqual(self.db.execute("SELECT source_id FROM sources").fetchone()[0], source_id)
 
+    def test_changed_rename_explicit_mapping_keeps_source_id(self):
+        path = self.write("old.md", chat("【2026-09-15 10:00】客户：如何新增客户？", "【2026-09-15 10:01】客服：点击新增客户并保存。"))
+        ingest(self.db, self.incoming, self.analyzer)
+        source_id = self.db.execute("SELECT source_id FROM sources").fetchone()[0]
+        path.unlink()
+        self.write("new.md", chat("【2026-09-15 10:00】客户：如何新增客户？", "【2026-09-15 10:01】客服：先选择门店，再点击新增客户并保存。"))
+        result = ingest(self.db, self.incoming / "new.md", self.analyzer, explicit_source_id=source_id)
+        self.assertEqual(result["summary"]["files_modified"], 1)
+        self.assertEqual(self.db.execute("SELECT source_id FROM sources").fetchone()[0], source_id)
+        self.assertEqual(ingest(self.db, self.incoming, self.analyzer)["summary"]["files_deleted"], 0)
+
     def test_conflict_requires_review(self):
         self.db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
             "KB-0646", 1, "active", "系统是否支持删除客户？", "系统支持删除客户。", None, "test", "2026-09-15T00:00:00Z",
@@ -165,6 +176,19 @@ class PipelineTest(unittest.TestCase):
         subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True)
         release = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
         (release / "chunks.jsonl").write_text((release / "chunks.jsonl").read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_release(release)
+
+    def test_sha256sums_detects_tampering(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True)
+        release = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+        sums = release / "SHA256SUMS"
+        sums.write_text(sums.read_text(encoding="utf-8").replace("a", "b", 1), encoding="utf-8")
         with self.assertRaises(ValueError):
             validate_release(release)
 

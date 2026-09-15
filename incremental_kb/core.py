@@ -258,7 +258,9 @@ def ingest(db: sqlite3.Connection, incoming: Path, analyzer: Analyzer, *, dry_ru
     if authoritative:
         deleted = [dict(row) for row in db.execute(
             "SELECT * FROM sources WHERE managed_root=? AND status='active'", (str(root),)
-        ) if row["path"] not in seen and not any(p["moved_from"] == row["path"] for p in plans)]
+        ) if row["path"] not in seen and not any(
+            p["moved_from"] == row["path"] or p["source_id"] == row["source_id"] for p in plans
+        )]
 
     counts = Counter(f"files_{p['change']}" for p in plans)
     counts["files_deleted"] = len(deleted)
@@ -431,6 +433,9 @@ def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model
     target = releases / version
     if target.exists():
         raise FileExistsError(f"immutable release already exists: {target}")
+    previous_version = _current_release(releases)
+    if previous_version and tuple(map(int, version.split("."))) <= tuple(map(int, previous_version.split("."))):
+        raise ValueError("release_version must increase beyond current release")
     pending = db.execute("SELECT COUNT(*) FROM reviews WHERE status='pending' AND relation IN ('conflict','temporal_update','revalidation_required')").fetchone()[0]
     if pending:
         raise ValueError(f"publishability gate blocked by {pending} high-risk pending review(s)")
@@ -501,6 +506,17 @@ def validate_release(release: Path) -> dict:
     for name, descriptor in manifest["files"].items():
         if sha256_file(release / name) != descriptor["sha256"]:
             raise ValueError(f"checksum mismatch: {name}")
+    sums = {}
+    for line in (release / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        digest, separator, name = line.partition("  ")
+        if not separator or not re.fullmatch(r"[0-9a-f]{64}", digest) or name in sums:
+            raise ValueError("invalid SHA256SUMS")
+        sums[name] = digest
+    if set(sums) != {"chunks.jsonl", "changelog.json", "manifest.json"}:
+        raise ValueError("SHA256SUMS file set mismatch")
+    for name, digest in sums.items():
+        if sha256_file(release / name) != digest:
+            raise ValueError(f"SHA256SUMS mismatch: {name}")
     sensitive = []
     for name in ("chunks.jsonl", "changelog.json", "manifest.json"):
         sensitive.extend(f"{name}:{item}" for item in scan_sensitive(release / name))
