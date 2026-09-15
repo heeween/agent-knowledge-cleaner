@@ -1,0 +1,19 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.idea/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.state/
+data/
+output/
+artifacts/
+*.log
+
+# Immutable, sanitized release artifacts are intentionally tracked.
+!releases/
+!releases/**
+
