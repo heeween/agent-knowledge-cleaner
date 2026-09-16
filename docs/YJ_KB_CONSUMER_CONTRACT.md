@@ -42,7 +42,17 @@ Each JSONL record contains:
 
 This is structured QA. It must not be rewritten as legacy timestamped chat Markdown. Consumers should store `kb_id`, `revision`, and `chunk_id` with vectors so answers can cite the exact published revision.
 
+## External vector artifact
+
+When vector retrieval is enabled, place `embeddings.jsonl` alongside the
+immutable release files before switching `current`. Each record binds
+`chunk_id`, `kb_id`, `revision`, declared `model`, SHA-256 of the chunk's exact
+`text` as `content_sha256`, and a finite vector of the declared dimension.
+The artifact is regenerable and Git-ignored, but the consumer must validate
+every binding and require complete coverage for vector-only deployments.
+Keep keyword fallback available if the artifact or query embedding service is
+temporarily unavailable.
+
 ## Rollback
 
 Rollback changes only `releases/current` to an already validated immutable directory. Consumers should treat the pointer change exactly like a new release and atomically reload it. No release directory is deleted by rollback.
-

@@ -16,4 +16,4 @@ artifacts/
 # Immutable, sanitized release artifacts are intentionally tracked.
 !releases/
 !releases/**
-
+releases/*/embeddings.jsonl

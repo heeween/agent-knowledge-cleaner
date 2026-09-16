@@ -21,6 +21,7 @@ python pipeline.py review --approve REV-... --note "verified against source"
 python pipeline.py publish --version 1.0.1
 python pipeline.py validate-release releases/1.0.1
 python pipeline.py rollback
+python scripts/build_release_embeddings.py releases/1.0.2
 ```
 
 Directory ingest is authoritative for deletion detection inside that managed root. Single-file ingest never infers deletion of other files. The default overlap is 30 messages and can be changed with `--overlap-messages`.
@@ -47,13 +48,21 @@ python -m compileall -q pipeline.py incremental_kb tests
 
 See [docs/YJ_KB_CONSUMER_CONTRACT.md](docs/YJ_KB_CONSUMER_CONTRACT.md) for the release format.
 
+`build_release_embeddings.py` attaches an external `embeddings.jsonl` only when
+the frozen embedding cache has exact-text matches for every published chunk.
+It validates the declared model and dimension, binds each vector to the KB
+revision and text SHA-256, and never overwrites an existing artifact. For a
+new or revised chunk absent from the cache, regenerate its embedding with the
+declared model first; the script refuses partial coverage. The vector file is
+excluded from Git and must accompany the release when syncing to yj-kb.
+
 ## Syncing to yj-kb
 
 The cleaner owns release synchronization. `scripts/sync_release.py` defaults to a read-only remote preflight. Only `--apply` stages an immutable version, verifies it on the host, switches `current`, and calls `/kb/reload`. If reload fails, it restores the previous pointer when available. It never deletes an old release.
 
 ```bash
-python scripts/sync_release.py --version 1.0.1
-python scripts/sync_release.py --version 1.0.1 --apply
+python scripts/sync_release.py --version 1.0.2
+python scripts/sync_release.py --version 1.0.2 --apply
 python scripts/sync_release.py --rollback-to 1.0.0
 python scripts/sync_release.py --rollback-to 1.0.0 --apply
 ```
