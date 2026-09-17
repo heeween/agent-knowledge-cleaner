@@ -2603,3 +2603,15 @@ current 1.0.2 → 1.0.3，/kb/reload 200，
 + 645 向量）。视频层文件已随行上服务器，
 待 yj-kb 侧加载代码后生效。
 
+## 客户可见链接改为应用内地址（2026-09-17 会话）
+
+yj-kb 回复中的视频链接不用 OSS 直链，
+改为 xcrm 使用说明页：
+https://a.rcar.vip/instruction/video/{video_id}
+（67 号脚本 VIDEO_APP_URL_TEMPLATE）。
+配套改动：xcrm 路由守卫放行 /instruction
+前缀子路径（免登录，xcrm_2 1832f66）；
+yj-kb 回复拼接与校验逻辑不变（URL 无关）。
+1.0.4 = 1.0.3 内容 + 新链接，已一键发布
+并同步远端（/kb/status 确认 1.0.4）。
+
