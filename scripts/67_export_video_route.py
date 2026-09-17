@@ -43,6 +43,9 @@ DIMENSION = 2048
 ROUTE_EXPECTED = 154
 LINKAGE_EXPECTED = 50
 LINK_MIN_SIMILARITY = 0.80
+# 客户可见链接走应用内使用说明页（xcrm 已对 /instruction 前缀免登录）；
+# OSS 直链仅是素材源，不进回复
+VIDEO_APP_URL_TEMPLATE = "https://a.rcar.vip/instruction/video/{video_id}"
 
 
 def text_key(text: str) -> str:
@@ -65,7 +68,7 @@ def build_route(manifest, trigger_rows, cache):
                 {
                     "video_id": video_id,
                     "question": question,
-                    "video_url": meta["video_url"],
+                    "video_url": VIDEO_APP_URL_TEMPLATE.format(video_id=video_id),
                     "title": meta["title"],
                     "summary": meta["summary"],
                     "duration_hms": meta["duration_hms"],
@@ -97,7 +100,7 @@ def build_linkage(manifest, chunks_kb_ids):
                     "kb_id": kb_id,
                     "similarity": similarity,
                     "kb_question": row["kb_question"],
-                    "video_url": meta["video_url"],
+                    "video_url": VIDEO_APP_URL_TEMPLATE.format(video_id=video_id),
                     "title": meta["title"],
                 }
             )
