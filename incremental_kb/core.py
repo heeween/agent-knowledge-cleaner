@@ -422,6 +422,50 @@ def git_tracked_tree_clean(root: Path) -> bool:
     return result.returncode == 0
 
 
+VIDEO_ROUTE_FILE = "video_route.jsonl"
+VIDEO_LINKAGE_FILE = "video_linkage.jsonl"
+VIDEO_ROUTE_KEYS = {"video_id", "question", "video_url", "title", "summary", "duration_hms", "embedding", "model", "content_sha256"}
+
+
+def _attach_video_layer(temp: Path, root: Path, embedding_model: str) -> dict | None:
+    """附带视频路由层（scripts/67 产物）到发布目录。
+
+    两个文件必须同时存在或同时缺失；存在时复制进 release 并返回
+    manifest["video"] 段（自带 sha256，不走 SHA256SUMS——两侧校验器
+    均硬编码三文件集，附带文件与 embeddings.jsonl 同属可再生制品）。
+    """
+    route = root / "output" / VIDEO_ROUTE_FILE
+    linkage = root / "output" / VIDEO_LINKAGE_FILE
+    if route.exists() != linkage.exists():
+        raise ValueError("video export files inconsistent; run scripts/67_export_video_route.py")
+    if not route.exists():
+        return None
+
+    route_rows = [json.loads(line) for line in route.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not route_rows:
+        raise ValueError("video_route.jsonl is empty")
+    dims = {len(row["embedding"]) for row in route_rows}
+    if len(dims) != 1:
+        raise ValueError(f"video route embedding dims inconsistent: {dims}")
+    for row in route_rows:
+        if set(row) != VIDEO_ROUTE_KEYS or not str(row["video_url"]).startswith("https://") or row["model"] != embedding_model:
+            raise ValueError(f"video route row invalid: {row.get('question', '?')[:30]}")
+    linkage_rows = [json.loads(line) for line in linkage.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not linkage_rows:
+        raise ValueError("video_linkage.jsonl is empty")
+
+    shutil.copyfile(route, temp / VIDEO_ROUTE_FILE)
+    shutil.copyfile(linkage, temp / VIDEO_LINKAGE_FILE)
+    return {
+        "files": {
+            VIDEO_ROUTE_FILE: {"sha256": sha256_file(temp / VIDEO_ROUTE_FILE)},
+            VIDEO_LINKAGE_FILE: {"sha256": sha256_file(temp / VIDEO_LINKAGE_FILE)},
+        },
+        "route_count": len(route_rows),
+        "linkage_count": len(linkage_rows),
+    }
+
+
 def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model: str,
             embedding_dimension: int) -> Path:
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
@@ -475,6 +519,7 @@ def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model
         (temp / "changelog.json").write_text(json.dumps({
             "release_version": version, "previous_release": previous, **changes,
         }, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        video_section = _attach_video_layer(temp, root, embedding_model)
         file_hashes = {name: sha256_file(temp / name) for name in ("chunks.jsonl", "changelog.json")}
         manifest = {
             "schema_version": SCHEMA_VERSION, "release_version": version,
@@ -482,6 +527,8 @@ def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model
             "embedding": {"model": embedding_model, "dimension": embedding_dimension, "artifact": "external_regenerable"},
             "source_commit": source_commit, "files": {name: {"sha256": digest} for name, digest in file_hashes.items()},
         }
+        if video_section:
+            manifest["video"] = video_section
         (temp / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         all_hashes = {**file_hashes, "manifest.json": sha256_file(temp / "manifest.json")}
         (temp / "SHA256SUMS").write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(all_hashes.items())), encoding="utf-8")
@@ -517,8 +564,15 @@ def validate_release(release: Path) -> dict:
     for name, digest in sums.items():
         if sha256_file(release / name) != digest:
             raise ValueError(f"SHA256SUMS mismatch: {name}")
+    video_section = manifest.get("video")
+    scan_names = ["chunks.jsonl", "changelog.json", "manifest.json"]
+    if video_section:
+        for name, descriptor in video_section["files"].items():
+            if sha256_file(release / name) != descriptor["sha256"]:
+                raise ValueError(f"checksum mismatch: {name}")
+            scan_names.append(name)
     sensitive = []
-    for name in ("chunks.jsonl", "changelog.json", "manifest.json"):
+    for name in scan_names:
         sensitive.extend(f"{name}:{item}" for item in scan_sensitive(release / name))
     if sensitive:
         raise ValueError("sensitive release content: " + ", ".join(sensitive))
