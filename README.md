@@ -24,6 +24,17 @@ python pipeline.py rollback
 python scripts/build_release_embeddings.py releases/1.0.2
 ```
 
+One-shot orchestration of the full release flow — publish → embeddings attach
+→ remote preflight; `--apply` also stages remotely, verifies, switches
+`current`, and hot-reloads. Completed steps are detected and skipped, so it is
+safe to re-run:
+
+```bash
+python scripts/release.py --version 1.0.4             # 本地发布 + 向量挂载 + 远端只读预检
+python scripts/release.py --version 1.0.4 --apply     # 全部步骤，含远端同步与热切换
+python scripts/release.py --version 1.0.3 --sync-only # 本地已完成，只走远端
+```
+
 Directory ingest is authoritative for deletion detection inside that managed root. Single-file ingest never infers deletion of other files. The default overlap is 30 messages and can be changed with `--overlap-messages`.
 
 Normal ingest uses the deterministic analyzer and never calls a network service. External analysis is opt-in:

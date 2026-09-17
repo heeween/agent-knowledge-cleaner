@@ -2586,3 +2586,20 @@ validate_release 同步校验 video 段哈希
 1.0.3 = 1.0.2 内容 + 视频层（QA 零变化，
 changelog added/revised/removed 全空）。
 
+## 一键发布编排（2026-09-17 会话）
+
+scripts/release.py 串起 publish →
+build_release_embeddings → sync_release
+三步（不替代守卫，已完成步骤自动检测
+跳过，可安全重跑）：
+
+- 默认：本地发布 + 向量挂载 + 远端只读预检
+- --apply：含远端暂存/SHA 校验/原子切换/热加载
+- --sync-only：本地已完成，只走远端
+
+1.0.3 已于 2026-09-17 用该脚本同步远端：
+current 1.0.2 → 1.0.3，/kb/reload 200，
+/kb/status 三连抽均为 1.0.3（645 chunk
++ 645 向量）。视频层文件已随行上服务器，
+待 yj-kb 侧加载代码后生效。
+
