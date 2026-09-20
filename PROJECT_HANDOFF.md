@@ -2813,3 +2813,21 @@ r2 只能经 ingest+review 产生）；
 
 注意: 真实仓库的 changelog 会以本地 1.0.4 为基准
 (added 326 / revised 26 / removed 619), 属预期。
+
+## 33.2 发布 1.1.1（2026-09-20 完成）
+
+- 1.1.0 首次同步 /kb/reload 返回 409（current 自动回滚 1.0.8,
+  生产无损）。原因: yj-kb 消费端按硬编码文件名校验
+  manifest.video.files (video_route.jsonl + video_linkage.jsonl),
+  且拒绝指向未知条目的联动行; 1.1.0 把过滤后的联动发布成了
+  video_linkage_v2.jsonl。
+- 修复: _attach_video_layer 本地审计产物保持 v2 名,
+  发布进 release 时用规范名 video_linkage.jsonl (4bf52ac)。
+- 1.1.1 走 76 号对账闸 (PASS) 后 --apply:
+  previous 1.0.8 -> current 1.1.1, reload 200。
+  /kb/status: 326 chunk + 326 向量 + 视频 154/9。
+  远端抽检: KB-0004@r2 服务器文本在位, KB-0002/0017 已不在,
+  KB-0646..KB-0945 共 300 条新条目在位。
+- 注意: 远端 1.1.0 目录按不可变策略保留 (未激活的死版本),
+  不要手工删除; registry/kb_revisions.jsonl 是 publish 时自动
+  再导出的跟踪文件, 基线大改后需先单独提交再 publish。
