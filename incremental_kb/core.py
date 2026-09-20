@@ -479,7 +479,9 @@ def _attach_video_layer(temp: Path, root: Path, embedding_model: str, active_ids
     manifest["video"] 段（自带 sha256，不走 SHA256SUMS——两侧校验器
     均硬编码三文件集，附带文件与 embeddings.jsonl 同属可再生制品）。
     联动 v1 指向大量 v4 重立基线中退役的条目；存在 video_linkage_v2.jsonl
-    时优先使用，且联动引用的 kb_id 必须都在本次发布快照内（防死链）。
+    时优先使用其（已过滤的）内容，但发布文件名必须是规范名
+    video_linkage.jsonl——yj-kb 消费端按该名字校验 manifest video 段，
+    且拒绝指向快照外条目的联动行（防死链）。
     """
     route = root / "output" / VIDEO_ROUTE_FILE
     linkage_v2 = root / "output" / VIDEO_LINKAGE_V2_FILE
@@ -506,11 +508,11 @@ def _attach_video_layer(temp: Path, root: Path, embedding_model: str, active_ids
         raise ValueError(f"video linkage references entries outside the active snapshot: {dangling}; regenerate via scripts/68")
 
     shutil.copyfile(route, temp / VIDEO_ROUTE_FILE)
-    shutil.copyfile(linkage, temp / Path(linkage).name)
+    shutil.copyfile(linkage, temp / VIDEO_LINKAGE_FILE)
     return {
         "files": {
             VIDEO_ROUTE_FILE: {"sha256": sha256_file(temp / VIDEO_ROUTE_FILE)},
-            Path(linkage).name: {"sha256": sha256_file(temp / Path(linkage).name)},
+            VIDEO_LINKAGE_FILE: {"sha256": sha256_file(temp / VIDEO_LINKAGE_FILE)},
         },
         "route_count": len(route_rows),
         "linkage_count": len(linkage_rows),
