@@ -2615,3 +2615,201 @@ yj-kb 回复拼接与校验逻辑不变（URL 无关）。
 1.0.4 = 1.0.3 内容 + 新链接，已一键发布
 并同步远端（/kb/status 确认 1.0.4）。
 
+## 冻结条目修订解禁 + 向量生成路径（2026-09-18 会话）
+
+背景：KB-0004（企微接口许可续费）r1 的
+"电脑端打开购买页面，手机企微APP扫码"
+把购后授权扫码错误并入购买步骤
+（溯源 ISSUE-CAND-001204 博捷汽修群
+2025-08-27：付款在前 18:37，扫码是
+20:14 之后两个授权二维码）。修复被
+publish 守卫与向量挂载两处卡死，本次
+只打通管道（①②），不改正文。
+
+① publish 守卫（incremental_kb/core.py）：
+
+- 原"frozen KB identity/revision guard"
+  要求 KB-0001..0645 全部 r1，任何
+  冻结条目升 r2 即拒发
+- 现改为"frozen KB identity guard"：
+  只锁 645 个 id 连续唯一不重排，
+  revision 可 >= 2；新增全量历史链
+  校验（每 kb 的 revision 必须从 1
+  连续到 N、仅末位 active 其余
+  superseded、rN 的 supersedes 精确
+  指向 {kb_id}@r{N-1}，任一断裂拒发）
+- 冻结基线文件与旧 release 不可变性
+  不变；修订只能走 review 决议产生
+  （decide_review 本就支持任意 target）
+- 测试 +4：r2 可发布且 changelog 记
+  revised、supersedes 断链拒发、
+  revision 跳号拒发、缺冻结条目拒发
+
+② 向量挂载（scripts/build_release_embeddings.py）：
+
+- 默认行为不变：纯离线，冻结缓存
+  （rag_chunk_embeddings_v1）逐字文本
+  匹配，miss 即拒，"never calls an API"
+- 新增 --generate-missing：缓存没有的
+  修订/新增文本走 embedding API（model
+  取 manifest 声明；OPENAI_API_KEY 必填，
+  OPENAI_BASE_URL 可覆盖，默认 bigmodel
+  paas v4；重试退避同 59 号脚本）
+- 生成向量落入内容寻址 supplement 缓存
+  output/rag_chunk_embeddings_supplement_v1
+  .jsonl（键 content_sha256=sha256(text)），
+  之后重跑同版本纯离线可复现
+- scripts/release.py 透传同名开关到
+  步骤 2/3；测试 +1（生成→落缓存→
+  离线复跑全链）
+
+待办（后续会话）：③ 人工核定 KB-0004
+r2 完整文案（购买与购后授权两步走，
+保留计费/名单/应用授权正确部分）；
+④ revision.py revise 人工入口（当前
+r2 只能经 ingest+review 产生）；
+⑤ release.py --generate-missing --apply
+出 1.0.5 并同步远端。
+
+## 服务端快速修订通道落地 yj-kb / yj-crm-kb（2026-09-18 会话）
+
+按用户决策，人工审核+修改+一键发布功能
+没有做进本仓库，而是做进了消费端：
+
+- yj-kb：`app/retrieval/kb_editor.py`
+  （待发布存储 + 发布器，staging 全量
+  自校验后原子切 current + 热加载）+
+  `app/api/kb_admin.py`（/kb-admin 路由，
+  X-Kb-Admin-Token 门禁，令牌未配置
+  即 503 禁用）。修订守卫与本仓库口径
+  一致（≥20 字、禁手机号）；修订条目
+  向量用 AsyncEmbeddingClient 重新生成。
+- yj-crm-kb：KbAdminView.tsx"知识修订"
+  视图（搜索/编辑/待发布徽章/一键发布
+  确认弹层/令牌设置）。
+- 端到端已验证：真实 1.0.4 副本上修订
+  KB-0004（两步走文案）→ 发布 1.0.5 →
+  645 chunk + 645 向量热加载，旧 release
+  字节不变。
+- ⚠️ 对账注意：该通道产出的 r2+ 修订
+  存在服务器 release 里，不回写本仓库
+  registry。本仓库下次 publish 前必须
+  先核对服务器 current 版本，否则可能
+  版本号冲突或修订被 r1 基线覆盖
+  （例如服务器已 1.0.5 时，本仓库应
+  以服务器 changelog 为准合并后再发）。
+- ④⑤ 因此转为主通道；本仓库 ①② 的
+  守卫放开与向量生成路径保留，供
+  全量重建场景使用。
+
+## 2026-09-18 生产上线记录（kb-admin 通道）
+
+- yj-kb a6e68b4 + a656d88 已发布
+  （deploy_yjkb.sh，服务器 fast-forward
+  + supervisor 重启，健康检查通过）；
+  KB_ADMIN_TOKEN 按该仓库惯例写入
+  被跟踪的 .env（私有 gitee 仓库）。
+- yj-crm-kb 3bc7510 已 build+deploy
+  （deploy.sh，静态包覆盖即生效）。
+- nginx /etc/nginx/conf.d/yj-agent.conf
+  新增 /kb/kb-admin/ → yj_kb/kb-admin/
+  代理块（改动前备份为 .bak-kbadmin）。
+- **服务器 current 已是 1.0.5**：
+  KB-0004@r2（两步走修正文案，
+  provenance kb-admin:manual-revision），
+  645 chunk + 645 向量（服务器侧真实
+  embedding 生成）+ 视频层完整。
+- ⚠️ 本仓库 registry 仍停在 1.0.4/r1。
+  下次全量 publish 前必须先把服务器
+  1.0.5 的 changelog/revisions 合并进
+  本地 registry（或以服务器为准重建
+  基线），否则会版本冲突或覆盖 r2。
+
+
+# 33. v4 重立基线 + funnel v2（2026-09-20 会话）
+
+用户决策: 不走增量, 改为重立基线 --
+
+- 保留: yj-kb kb-admin 通道修改过的 26 条
+  (文本以服务器 1.0.8 为准)
+- 退役: 未修改的 615 条 + 服务器已删的 4 条,
+  共 619 条 (registry 内保留审计链, status=retired)
+- 新知识: 只允许来源 2026-03-01 之后的聊天切片,
+  新 id 从 KB-0646 起
+
+已落地:
+
+- scripts/68_rebaseline_v4.py:
+  对账 1.0.4 vs 1.0.8 (revised 26 / removed 4 /
+  unmodified 615), 干净起点校验 (本地 r1 == 1.0.4
+  逐字一致), 产出 output/kb_entries_official_v4.jsonl
+  (sha256 a4080d3168903ad330a8156ee6cbba54648fc5a511a363fa7cb58e4873161029)
+  + output/kb_official_v4_contract.json,
+  registry 升级前自动在线备份 (.state/registry.backup-*)
+- core.py: bootstrap/publish 切到 v4 基线;
+  publish 冻结守卫改为 contract 驱动 (survivor 必须 active,
+  retired 不得 active); revision 链终态允许 retired;
+  decide_review 新 id 跳过退役段 (KB-0646 起);
+  视频联动优先 video_linkage_v2.jsonl (剔除 41 条死链,
+  保留 9 条), 并校验联动 kb_id 全在快照内
+- pipeline.py: BASELINE -> v4
+- tests: 27 个全过 (含 survivor 缺失 / retired 复活 /
+  retired 排除三个新守卫用例)
+- funnel v2 (747 after 切片 = 566 复用 778 行 +
+  61 切片富集 64 行 + 120 切片新抽取):
+  scripts/69 (过滤, 747 守卫), 70 (组装, 三层覆盖守卫),
+  71 (LLM 抽取/富集, glm-5.3-flash, 断点续跑),
+  72 (Layer A 重算 + C1/C2 去重 + C3 对 26 条 survivor
+  查重, embedding-3, 阈值 0.90 同 53),
+  73 (LLM 准入, prompt 同 54),
+  74 (publishability gate, prompt 同 56),
+  75 (导出 kb_entries_incremental_v1.jsonl + registry 导入,
+  守卫同 57: 无 pre_flags / 答案>=20字 / 手机号 0)
+- scripts/76_release_guard_v4.py: 发布对账硬校验 --
+  survivor 文本必须与服务器 1.0.8 逐字一致,
+  retired 不得出现在快照, 新增 id 必须 >= KB-0646
+
+发布 1.1.0 的顺序 (严格):
+
+1. funnel v2 跑完 (71->72->73->74->75)
+2. git commit (publish 要求 tracked tree 干净)
+3. python pipeline.py publish --version 1.1.0
+   (本地 current 1.0.4, 远端 current 1.0.8, 1.1.0 均可越过)
+4. python scripts/76_release_guard_v4.py --release releases/1.1.0
+5. python scripts/release.py --version 1.1.0 --generate-missing --apply
+   (补新条目向量 + 远端 staging + current 切换 + 热加载)
+
+注意:
+
+- changelog.json 的 diff 基准是本地上一版 (1.0.4),
+  因此会显示 619 removed / 26 revised / N added;
+  服务器视角 (1.0.8 -> 1.1.0) 实际只有 removed + added。
+  changelog 仅供审计展示, 不参与快照重建。
+- 服务器 kb-admin 后续若再出修订, 必须先重跑
+  scripts/68 的对账部分 (幂等) 再 publish。
+
+## 33.1 funnel v2 产出（2026-09-20 实跑结果）
+
+- 877 行合并（778 复用 + 64 富集 + 35 新抽取）
+- Layer A 重算与 v1 excluded 标志 778/778 一致;
+  A 层后 602 行
+- 去重: C2 近似 5, C1/C3 存量重复 0 -> 597 行
+- LLM 准入: 462 candidate / 135 reject
+- publishability gate: **publish 300** / manual_review 153 / reject 9
+- 导出 output/kb_entries_incremental_v1.jsonl:
+  KB-0646..KB-0945 共 300 条, 已导入 registry (r1 active)
+- registry 终态: 971 revisions =
+  326 active (26 survivor r2 + 300 新 r1)
+  + 619 retired + 26 superseded
+- 临时目录演练 publish 1.1.0 通过:
+  chunk_count=326, survivor 与服务器 1.0.8 文本 0 差异,
+  视频联动 9 条无死链, contract/链式守卫全过
+
+剩余步骤 (需要先 git commit, publish 要求 tracked tree 干净):
+
+    python pipeline.py publish --version 1.1.0
+    python scripts/76_release_guard_v4.py --release releases/1.1.0
+    python scripts/release.py --version 1.1.0 --generate-missing --apply
+
+注意: 真实仓库的 changelog 会以本地 1.0.4 为基准
+(added 326 / revised 26 / removed 619), 属预期。

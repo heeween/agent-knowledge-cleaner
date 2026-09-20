@@ -15,7 +15,7 @@ from incremental_kb.core import (
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_STATE = ROOT / ".state" / "registry.sqlite3"
-BASELINE = ROOT / "output" / "kb_entries_official_v3.jsonl"
+BASELINE = ROOT / "output" / "kb_entries_official_v4.jsonl"
 KB_REGISTRY = ROOT / "registry" / "kb_revisions.jsonl"
 
 
@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="local SQLite registry")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("init", help="initialize local state from frozen 645-entry baseline")
+    commands.add_parser("init", help="initialize local state from the frozen 26-entry v4 baseline")
 
     ingest_parser = commands.add_parser("ingest", help="plan or ingest new/changed chat Markdown")
     ingest_parser.add_argument("incoming_path", type=Path)
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         db = open_state(args.state.resolve(), dry_run=args.command == "ingest" and args.dry_run)
         if args.command == "init":
             export_kb_registry(db, KB_REGISTRY)
-            print_json({"state": str(args.state.resolve()), "baseline_entries": 645, "kb_registry": str(KB_REGISTRY)})
+            print_json({"state": str(args.state.resolve()), "baseline_entries": 26, "kb_registry": str(KB_REGISTRY)})
         elif args.command == "ingest":
             if args.overlap_messages < 1:
                 raise ValueError("--overlap-messages must be >= 1")

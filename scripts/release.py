@@ -6,7 +6,10 @@
   1. pipeline.py publish --version X       本地不可变快照
                                            （干净树 / 冻结基线 / 原子落盘）
   2. scripts/build_release_embeddings.py   从冻结缓存挂载 embeddings.jsonl
-                                           （无 API；逐条文本/模型/维度校验）
+                                           （逐条文本/模型/维度校验；默认无 API。
+                                           传 --generate-missing 时，冻结缓存
+                                           没有的修订/新增文本走 embedding API
+                                           并落入内容寻址 supplement 缓存）
   3. scripts/sync_release.py --version X   远端只读预检；--apply 才
                                            暂存 + SHA 校验 + 原子切换 + 热加载
 
@@ -92,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, help="SemVer 版本号，如 1.0.4")
     parser.add_argument("--apply", action="store_true", help="允许远端写入与热切换")
+    parser.add_argument("--generate-missing", action="store_true",
+                        help="向量挂载时对冻结缓存没有的文本调用 embedding API（透传给 build_release_embeddings.py）")
     parser.add_argument("--sync-only", action="store_true", help="跳过本地两步，只做远端同步")
     args = parser.parse_args(argv)
 
@@ -102,10 +107,10 @@ def main(argv: list[str] | None = None) -> int:
         if not check_local_release(release):
             run("步骤 1/3 本地发布", [python, str(ROOT / "pipeline.py"), "publish", "--version", args.version])
         if not check_embeddings(release):
-            run(
-                "步骤 2/3 挂载向量制品",
-                [python, str(ROOT / "scripts" / "build_release_embeddings.py"), str(release)],
-            )
+            mount = [python, str(ROOT / "scripts" / "build_release_embeddings.py"), str(release)]
+            if args.generate_missing:
+                mount.append("--generate-missing")
+            run("步骤 2/3 挂载向量制品", mount)
 
     run("步骤 3/3 远端预检（只读）", [python, str(ROOT / "scripts" / "sync_release.py"), "--version", args.version])
     if args.apply:

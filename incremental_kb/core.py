@@ -181,18 +181,18 @@ def bootstrap_baseline(db: sqlite3.Connection, baseline: Path) -> int:
     if db.execute("SELECT COUNT(*) FROM kb_revisions").fetchone()[0]:
         return 0
     records = [json.loads(line) for line in baseline.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if len(records) != 645 or records[0]["kb_id"] != "KB-0001" or records[-1]["kb_id"] != "KB-0645":
-        raise ValueError("frozen baseline must contain KB-0001..KB-0645")
-    if sha256_file(baseline) != "f57b19feb7f6a6e118e7ab48737d54ce2f59d56a70c1f2fea9e274076561c51f":
-        raise ValueError("frozen baseline SHA-256 mismatch")
+    if len(records) != 26 or records[0]["kb_id"] != "KB-0001":
+        raise ValueError("v4 baseline must contain the 26 server-edited survivors starting at KB-0001")
+    if sha256_file(baseline) != V4_BASELINE_SHA:
+        raise ValueError("v4 baseline SHA-256 mismatch")
     now = utc_now()
     for record in records:
         db.execute(
             "INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)",
             (record["kb_id"], 1, "active", record["question"], record["answer"], None,
-             "frozen:kb_entries_official_v3.jsonl", now),
+             "frozen:kb_entries_official_v4.jsonl", now),
         )
-    audit(db, "baseline_imported", "KB-0001..KB-0645", {"count": 645, "sha256": sha256_file(baseline)})
+    audit(db, "baseline_imported", f"KB-v4-{len(records)}", {"count": len(records), "sha256": sha256_file(baseline)})
     db.commit()
     return len(records)
 
@@ -379,7 +379,7 @@ def decide_review(db: sqlite3.Connection, review_id: str, decision: str, note: s
         kb_id = review["target_kb_id"]
         if not kb_id:
             maximum = db.execute("SELECT MAX(CAST(SUBSTR(kb_id,4) AS INTEGER)) FROM kb_revisions").fetchone()[0] or 0
-            kb_id = f"KB-{maximum + 1:04d}"
+            kb_id = f"KB-{max(maximum, 645) + 1:04d}"
             revision, supersedes = 1, None
         else:
             previous = db.execute("SELECT MAX(revision) FROM kb_revisions WHERE kb_id=?", (kb_id,)).fetchone()[0]
@@ -395,6 +395,51 @@ def decide_review(db: sqlite3.Connection, review_id: str, decision: str, note: s
                        (kb_id, revision, review["issue_id"], issue["source_id"], "active", now))
         audit(db, "review_approved", review_id, {"kb_id": kb_id, "revision": revision, "note": note})
     return {**dict(review), "kb_id": kb_id, "revision": revision}
+
+
+def text_sensitive_hits(text: str) -> list[str]:
+    return [name for name, pattern in SENSITIVE_PATTERNS if pattern.search(text)]
+
+
+V4_BASELINE_SHA = "a4080d3168903ad330a8156ee6cbba54648fc5a511a363fa7cb58e4873161029"
+V4_CONTRACT_FILE = "kb_official_v4_contract.json"
+VIDEO_LINKAGE_V2_FILE = "video_linkage_v2.jsonl"
+
+
+def revise_entry(db: sqlite3.Connection, kb_id: str, question: str, answer: str, note: str = "") -> dict:
+    """Create revision r+1 for an existing entry from human-reviewed text.
+
+    Guards mirror the export/publish quality bar: non-empty question/answer,
+    answer >= 20 chars, no sensitive-pattern hits (phone numbers, credentials,
+    .env paths). The prior revision is superseded atomically and the note is
+    recorded as a local audit event; provenance stays a constant so the
+    sanitized registry export never carries free text.
+    """
+    maximum = db.execute("SELECT MAX(revision) FROM kb_revisions WHERE kb_id=?", (kb_id,)).fetchone()[0]
+    if maximum is None:
+        raise KeyError(kb_id)
+    current = db.execute(
+        "SELECT status FROM kb_revisions WHERE kb_id=? AND revision=?", (kb_id, maximum)
+    ).fetchone()
+    if current["status"] != "active":
+        raise ValueError(f"{kb_id}@r{maximum} is not active")
+    question, answer = question.strip(), answer.strip()
+    if not question or not answer:
+        raise ValueError("question and answer must be non-empty")
+    if len(answer) < 20:
+        raise ValueError("answer too short: minimum 20 characters (export guard)")
+    hits = text_sensitive_hits(question + "\n" + answer)
+    if hits:
+        raise ValueError("sensitive content rejected: " + ", ".join(hits))
+    now = utc_now()
+    with db:
+        db.execute("UPDATE kb_revisions SET status='superseded' WHERE kb_id=? AND revision=?", (kb_id, maximum))
+        db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
+            kb_id, maximum + 1, "active", question, answer,
+            f"{kb_id}@r{maximum}", "manual:review-ui", now,
+        ))
+        audit(db, "entry_revised", f"{kb_id}@r{maximum + 1}", {"note": note, "previous_revision": maximum})
+    return {"kb_id": kb_id, "revision": maximum + 1, "supersedes": f"{kb_id}@r{maximum}"}
 
 
 def export_kb_registry(db: sqlite3.Connection, path: Path) -> None:
@@ -427,15 +472,18 @@ VIDEO_LINKAGE_FILE = "video_linkage.jsonl"
 VIDEO_ROUTE_KEYS = {"video_id", "question", "video_url", "title", "summary", "duration_hms", "embedding", "model", "content_sha256"}
 
 
-def _attach_video_layer(temp: Path, root: Path, embedding_model: str) -> dict | None:
+def _attach_video_layer(temp: Path, root: Path, embedding_model: str, active_ids: set[str]) -> dict | None:
     """附带视频路由层（scripts/67 产物）到发布目录。
 
     两个文件必须同时存在或同时缺失；存在时复制进 release 并返回
     manifest["video"] 段（自带 sha256，不走 SHA256SUMS——两侧校验器
     均硬编码三文件集，附带文件与 embeddings.jsonl 同属可再生制品）。
+    联动 v1 指向大量 v4 重立基线中退役的条目；存在 video_linkage_v2.jsonl
+    时优先使用，且联动引用的 kb_id 必须都在本次发布快照内（防死链）。
     """
     route = root / "output" / VIDEO_ROUTE_FILE
-    linkage = root / "output" / VIDEO_LINKAGE_FILE
+    linkage_v2 = root / "output" / VIDEO_LINKAGE_V2_FILE
+    linkage = linkage_v2 if linkage_v2.exists() else root / "output" / VIDEO_LINKAGE_FILE
     if route.exists() != linkage.exists():
         raise ValueError("video export files inconsistent; run scripts/67_export_video_route.py")
     if not route.exists():
@@ -453,26 +501,43 @@ def _attach_video_layer(temp: Path, root: Path, embedding_model: str) -> dict | 
     linkage_rows = [json.loads(line) for line in linkage.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not linkage_rows:
         raise ValueError("video_linkage.jsonl is empty")
+    dangling = sorted({row["kb_id"] for row in linkage_rows} - active_ids)
+    if dangling:
+        raise ValueError(f"video linkage references entries outside the active snapshot: {dangling}; regenerate via scripts/68")
 
     shutil.copyfile(route, temp / VIDEO_ROUTE_FILE)
-    shutil.copyfile(linkage, temp / VIDEO_LINKAGE_FILE)
+    shutil.copyfile(linkage, temp / Path(linkage).name)
     return {
         "files": {
             VIDEO_ROUTE_FILE: {"sha256": sha256_file(temp / VIDEO_ROUTE_FILE)},
-            VIDEO_LINKAGE_FILE: {"sha256": sha256_file(temp / VIDEO_LINKAGE_FILE)},
+            Path(linkage).name: {"sha256": sha256_file(temp / Path(linkage).name)},
         },
         "route_count": len(route_rows),
         "linkage_count": len(linkage_rows),
     }
 
 
+def _load_v4_contract(root: Path) -> dict:
+    path = root / "output" / V4_CONTRACT_FILE
+    if not path.exists():
+        raise ValueError(f"missing v4 rebaseline contract: {path}; run scripts/68_rebaseline_v4.py")
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    required = {"survivor_ids", "retired_ids", "baseline_sha256"}
+    if not required.issubset(contract) or set(contract["survivor_ids"]) & set(contract["retired_ids"]):
+        raise ValueError("v4 rebaseline contract is malformed")
+    if len(contract["survivor_ids"]) + len(contract["retired_ids"]) != 645:
+        raise ValueError("v4 rebaseline contract must cover all 645 baseline ids")
+    return contract
+
+
 def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model: str,
             embedding_dimension: int) -> Path:
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("release version must be SemVer, e.g. 1.0.0")
-    baseline = root / "output" / "kb_entries_official_v3.jsonl"
-    if baseline.exists() and sha256_file(baseline) != "f57b19feb7f6a6e118e7ab48737d54ce2f59d56a70c1f2fea9e274076561c51f":
-        raise ValueError("frozen baseline changed; publish refused")
+    baseline = root / "output" / "kb_entries_official_v4.jsonl"
+    if baseline.exists() and sha256_file(baseline) != V4_BASELINE_SHA:
+        raise ValueError("frozen v4 baseline changed; publish refused")
+    contract = _load_v4_contract(root)
     releases = root / "releases"
     target = releases / version
     if target.exists():
@@ -486,9 +551,31 @@ def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model
     active = active_kb(db)
     if not active or active[0]["kb_id"] != "KB-0001":
         raise ValueError("active KB snapshot is invalid")
-    frozen = [row for row in active if int(row["kb_id"][3:]) <= 645]
-    if len(frozen) != 645 or any(row["kb_id"] != f"KB-{index:04d}" or row["revision"] != 1 for index, row in enumerate(frozen, 1)):
-        raise ValueError("frozen KB identity/revision guard failed")
+    active_ids = {row["kb_id"] for row in active}
+    missing_survivors = sorted(set(contract["survivor_ids"]) - active_ids)
+    if missing_survivors:
+        raise ValueError(f"v4 contract guard failed; survivor entries not active: {missing_survivors}")
+    illegitimate = sorted(
+        kb_id for kb_id in active_ids
+        if int(kb_id[3:]) <= 645 and kb_id not in set(contract["survivor_ids"])
+    )
+    if illegitimate:
+        raise ValueError(f"v4 contract guard failed; retired baseline entries are active: {illegitimate}")
+    history: dict[str, list] = {}
+    for row in db.execute("SELECT kb_id, revision, status, supersedes FROM kb_revisions ORDER BY kb_id, revision"):
+        history.setdefault(row["kb_id"], []).append(row)
+    for kb_id, revisions in history.items():
+        if [row["revision"] for row in revisions] != list(range(1, len(revisions) + 1)):
+            raise ValueError(f"revision chain broken: {kb_id}")
+        terminal = revisions[-1]["status"]
+        if terminal not in {"active", "retired"}:
+            raise ValueError(f"revision status chain broken: {kb_id}")
+        if [row["status"] for row in revisions[:-1]] != ["superseded"] * (len(revisions) - 1):
+            raise ValueError(f"revision status chain broken: {kb_id}")
+        for row in revisions:
+            expected_supersedes = None if row["revision"] == 1 else f"{kb_id}@r{row['revision'] - 1}"
+            if row["supersedes"] != expected_supersedes:
+                raise ValueError(f"revision chain broken: {kb_id}@r{row['revision']}")
     source_commit = git_commit(root)
     if not git_tracked_tree_clean(root):
         raise RuntimeError("publish requires committed tracked source changes")
@@ -519,7 +606,7 @@ def publish(db: sqlite3.Connection, root: Path, version: str, *, embedding_model
         (temp / "changelog.json").write_text(json.dumps({
             "release_version": version, "previous_release": previous, **changes,
         }, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        video_section = _attach_video_layer(temp, root, embedding_model)
+        video_section = _attach_video_layer(temp, root, embedding_model, active_ids)
         file_hashes = {name: sha256_file(temp / name) for name in ("chunks.jsonl", "changelog.json")}
         manifest = {
             "schema_version": SCHEMA_VERSION, "release_version": version,

@@ -4,8 +4,10 @@ An offline, incremental knowledge-production pipeline for CRM chat exports. The 
 
 ## Safety invariants
 
-- `output/kb_entries_official_v3.jsonl` is the frozen 645-entry baseline. Its required SHA-256 is `f57b19feb7f6a6e118e7ab48737d54ce2f59d56a70c1f2fea9e274076561c51f`.
-- Existing IDs `KB-0001..KB-0645` never change. New IDs start at `KB-0646`.
+- `output/kb_entries_official_v3.jsonl` (645 entries) remains the immutable historical baseline for audit; it is no longer the publish baseline.
+- Since 2026-09-20 the publish baseline is `output/kb_entries_official_v4.jsonl` (26 entries, required SHA-256 `a4080d3168903ad330a8156ee6cbba54648fc5a511a363fa7cb58e4873161029`): exactly the entries revised through the yj-kb kb-admin channel (texts frozen at server release 1.0.8). `output/kb_official_v4_contract.json` records survivor vs retired ids; `publish()` enforces it (survivors active, retired never active).
+- The 619 retired v3 entries keep their revision/audit chains in the registry but never re-enter a snapshot. New knowledge only enters from chats after 2026-03-01 through the funnel v2 scripts (`scripts/69`–`76`), and new IDs start at `KB-0646`.
+- Before any sync to yj-kb run `scripts/76_release_guard_v4.py --release releases/<version>`: it verifies survivor texts match server 1.0.8 verbatim and that no retired entry resurfaced.
 - `.state/registry.sqlite3`, `data/`, `output/`, `.env`, and embeddings are not committed.
 - Published releases contain sanitized QA data, not raw chat messages or timestamped Markdown.
 - Text/status changes require review. A source change never silently rewrites a published KB revision.
@@ -33,6 +35,7 @@ safe to re-run:
 python scripts/release.py --version 1.0.4             # 本地发布 + 向量挂载 + 远端只读预检
 python scripts/release.py --version 1.0.4 --apply     # 全部步骤，含远端同步与热切换
 python scripts/release.py --version 1.0.3 --sync-only # 本地已完成，只走远端
+python scripts/release.py --version 1.0.5 --generate-missing --apply # 含修订/新增条目时补生成缺失向量
 ```
 
 Directory ingest is authoritative for deletion detection inside that managed root. Single-file ingest never infers deletion of other files. The default overlap is 30 messages and can be changed with `--overlap-messages`.
@@ -59,13 +62,17 @@ python -m compileall -q pipeline.py incremental_kb tests
 
 See [docs/YJ_KB_CONSUMER_CONTRACT.md](docs/YJ_KB_CONSUMER_CONTRACT.md) for the release format.
 
-`build_release_embeddings.py` attaches an external `embeddings.jsonl` only when
-the frozen embedding cache has exact-text matches for every published chunk.
-It validates the declared model and dimension, binds each vector to the KB
-revision and text SHA-256, and never overwrites an existing artifact. For a
-new or revised chunk absent from the cache, regenerate its embedding with the
-declared model first; the script refuses partial coverage. The vector file is
-excluded from Git and must accompany the release when syncing to yj-kb.
+`build_release_embeddings.py` attaches an external `embeddings.jsonl` when every
+published chunk has a vector. Default mode is fully offline: vectors come from the
+frozen embedding cache under exact-text match, validated against the declared
+model and dimension, bound to each KB revision and text SHA-256, and an existing
+artifact is never overwritten. A new or revised chunk absent from the cache makes
+the script refuse, unless `--generate-missing` is passed: such texts are embedded
+via the declared model's API (`OPENAI_API_KEY`; optional `OPENAI_BASE_URL`) and
+appended to a content-addressed supplement cache
+(`output/rag_chunk_embeddings_supplement_v1.jsonl`), so subsequent runs reproduce
+the artifact offline again. Vector files are excluded from Git and must accompany
+the release when syncing to yj-kb.
 
 ## Syncing to yj-kb
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -9,14 +10,15 @@ from pathlib import Path
 
 from incremental_kb.analyzers import DeterministicAnalyzer
 from incremental_kb.core import (
-    bootstrap_baseline, connect, decide_review, ingest, list_reviews, publish,
-    rollback, sha256_file, validate_release,
+    V4_BASELINE_SHA, bootstrap_baseline, connect, decide_review, ingest,
+    list_reviews, publish, rollback, sha256_file, validate_release,
 )
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-BASELINE = PROJECT / "output" / "kb_entries_official_v3.jsonl"
-BASELINE_SHA = "f57b19feb7f6a6e118e7ab48737d54ce2f59d56a70c1f2fea9e274076561c51f"
+BASELINE = PROJECT / "output" / "kb_entries_official_v4.jsonl"
+CONTRACT = PROJECT / "output" / "kb_official_v4_contract.json"
+BASELINE_SHA = V4_BASELINE_SHA
 
 
 def chat(*lines: str) -> str:
@@ -45,8 +47,11 @@ class PipelineTest(unittest.TestCase):
     def test_frozen_baseline_is_unchanged(self):
         self.assertEqual(sha256_file(BASELINE), BASELINE_SHA)
         rows = [json.loads(x) for x in BASELINE.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(len(rows), 645)
-        self.assertEqual([rows[0]["kb_id"], rows[-1]["kb_id"]], ["KB-0001", "KB-0645"])
+        contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+        self.assertEqual(len(rows), 26)
+        self.assertEqual([rows[0]["kb_id"], rows[-1]["kb_id"]], ["KB-0001", "KB-0034"])
+        self.assertEqual(sorted(row["kb_id"] for row in rows), sorted(contract["survivor_ids"]))
+        self.assertEqual(len(contract["survivor_ids"]) + len(contract["retired_ids"]), 645)
 
     def test_new_file_and_idempotent_repeat(self):
         path = self.write("a.md", chat("【2026-09-15 10:00】客户：怎么设置新的业务标签？", "【2026-09-15 10:01】客服：进入标签设置页面后新建标签并保存。"))
@@ -152,40 +157,106 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(result["kb_id"], f"KB-{645 + number:04d}")
 
     def test_publish_manifest_immutable_and_rollback(self):
-        repo = self.root / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-        (repo / "README.md").write_text("fixture\n", encoding="utf-8")
-        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True)
+        repo = self.make_repo()
         first = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
         manifest = validate_release(first)
-        self.assertEqual(manifest["chunk_count"], 645)
+        self.assertEqual(manifest["chunk_count"], 26)
         self.assertEqual(manifest["embedding"]["dimension"], 3)
         with self.assertRaises(FileExistsError):
             publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
         second = publish(self.db, repo, "1.0.1", embedding_model="mock", embedding_dimension=3)
         self.assertEqual((repo / "releases" / "current").resolve(), second.resolve())
         self.assertEqual(rollback(repo), "1.0.0")
-    def test_manifest_detects_tampering(self):
+    def make_repo(self) -> Path:
         repo = self.root / "repo"
-        repo.mkdir()
+        repo.mkdir(exist_ok=True)
+        output = repo / "output"
+        output.mkdir(exist_ok=True)
+        shutil.copyfile(BASELINE, output / BASELINE.name)
+        shutil.copyfile(CONTRACT, output / CONTRACT.name)
         subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
         (repo / "README.md").write_text("fixture\n", encoding="utf-8")
         subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
         subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def revise(self, kb_id: str, question: str, answer: str, supersedes: str | None = "auto") -> None:
+        previous = self.db.execute("SELECT MAX(revision) FROM kb_revisions WHERE kb_id=?", (kb_id,)).fetchone()[0]
+        if supersedes == "auto":
+            supersedes = f"{kb_id}@r{previous}"
+        with self.db:
+            self.db.execute("UPDATE kb_revisions SET status='superseded' WHERE kb_id=? AND revision=?", (kb_id, previous))
+            self.db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
+                kb_id, previous + 1, "active", question, answer, supersedes, "manual:test", "2026-09-18T00:00:00Z",
+            ))
+
+    def test_publish_allows_revised_frozen_entry(self):
+        repo = self.make_repo()
+        publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+        self.revise("KB-0004", "企业微信接口许可到期后如何续费？", "修正后的答案：购买与购后授权分为两步。")
+        second = publish(self.db, repo, "1.0.1", embedding_model="mock", embedding_dimension=3)
+        chunks = {json.loads(line)["kb_id"]: json.loads(line) for line in (second / "chunks.jsonl").read_text(encoding="utf-8").splitlines()}
+        self.assertEqual(chunks["KB-0004"]["chunk_id"], "KB-0004@r2")
+        self.assertIn("购后授权", chunks["KB-0004"]["answer"])
+        changelog = json.loads((second / "changelog.json").read_text(encoding="utf-8"))
+        self.assertEqual(changelog["revised"], ["KB-0004"])
+        old = [json.loads(line) for line in (repo / "releases" / "1.0.0" / "chunks.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(next(row for row in old if row["kb_id"] == "KB-0004")["revision"], 1)
+
+    def test_publish_rejects_broken_revision_chain(self):
+        repo = self.make_repo()
+        self.revise("KB-0004", "q", "a", supersedes=None)
+        with self.assertRaisesRegex(ValueError, "revision chain broken"):
+            publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+
+    def test_publish_rejects_revision_gap_in_history(self):
+        repo = self.make_repo()
+        with self.db:
+            self.db.execute("UPDATE kb_revisions SET status='superseded' WHERE kb_id='KB-0004' AND revision=1")
+            self.db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
+                "KB-0004", 3, "active", "q", "a", "KB-0004@r2", "manual:test", "2026-09-18T00:00:00Z",
+            ))
+        with self.assertRaisesRegex(ValueError, "revision chain broken"):
+            publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+
+    def test_publish_rejects_missing_survivor_entry(self):
+        repo = self.make_repo()
+        with self.db:
+            self.db.execute("DELETE FROM kb_revisions WHERE kb_id='KB-0004'")
+        with self.assertRaisesRegex(ValueError, "survivor entries not active"):
+            publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+
+    def test_publish_rejects_active_retired_entry(self):
+        repo = self.make_repo()
+        with self.db:
+            self.db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
+                "KB-0002", 1, "active", "已退役条目问题", "已退役条目答案，长度超过二十个字符的限制。", None,
+                "fixture", "2026-09-20T00:00:00Z",
+            ))
+        with self.assertRaisesRegex(ValueError, "retired baseline entries are active"):
+            publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+
+    def test_publish_excludes_retired_entries(self):
+        repo = self.make_repo()
+        with self.db:
+            self.db.execute("INSERT INTO kb_revisions VALUES(?,?,?,?,?,?,?,?)", (
+                "KB-0700", 1, "retired", "临时退役条目", "临时退役条目答案，长度超过二十个字符的限制。", None,
+                "fixture", "2026-09-20T00:00:00Z",
+            ))
+        release = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
+        chunks = [json.loads(line) for line in (release / "chunks.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(chunks), 26)
+        self.assertNotIn("KB-0700", {chunk["kb_id"] for chunk in chunks})
+
+    def test_manifest_detects_tampering(self):
+        repo = self.make_repo()
         release = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
         (release / "chunks.jsonl").write_text((release / "chunks.jsonl").read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
         with self.assertRaises(ValueError):
             validate_release(release)
 
     def test_sha256sums_detects_tampering(self):
-        repo = self.root / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
-        (repo / "README.md").write_text("fixture\n", encoding="utf-8")
-        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True)
+        repo = self.make_repo()
         release = publish(self.db, repo, "1.0.0", embedding_model="mock", embedding_dimension=3)
         sums = release / "SHA256SUMS"
         sums.write_text(sums.read_text(encoding="utf-8").replace("a", "b", 1), encoding="utf-8")
