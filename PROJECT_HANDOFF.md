@@ -2831,3 +2831,58 @@ r2 只能经 ingest+review 产生）；
 - 注意: 远端 1.1.0 目录按不可变策略保留 (未激活的死版本),
   不要手工删除; registry/kb_revisions.jsonl 是 publish 时自动
   再导出的跟踪文件, 基线大改后需先单独提交再 publish。
+
+# 34. 流水线线上化：迁移进 yj-kb（2026-09-20 会话）
+
+用户决策：保留从零全量重建能力，把整条流水线迁入 yj-kb 服务，
+前端提供「从零重建 / 增量更新」两个主入口。
+
+## 已落地
+
+- 服务器 /root/yj-kb/markdowns（364 个文件）与本机 data/raw/markdowns
+  363 个逐一 SHA-256 一致（服务器多一个非聊天格式便签
+  企微搜不到客户群.md，解析出 0 条消息，无害）。
+  此后聊天文件以服务器目录为唯一来源。
+- yj-kb 新增 app/kb_pipeline 包（gitee master 20848f5..c505676）：
+  - chatmd.py：03 解析正则 + 06 时间 gap 切分忠实移植；
+    奇偶校验（scripts/kb_pipeline_parity_check.py）通过——
+    363 文件 / 3606 切片与冻结 issue_candidates 逐条一致，
+    本机与服务器各验一次
+  - llmops/funnel：71/54/56 prompt 逐字同源，52 Layer A 与
+    53 去重阈值（0.90）同源，embedding 内容寻址缓存
+  - store/registry：与 cleaner .state 同 schema；增量新 id 从
+    KB-0946 起（next_kb_id 下限 645），重建新 id 从 KB-0001 起
+  - publish.py：进程内发布——自动对账服务器 current（kb-admin
+    修订合入 r+1、远端已删者退役）、存在待发布修订时拒绝发布、
+    kb_release.load_release 自校验、staging 原子切换、热加载失败
+    自动回滚 previous；不再依赖 git 提交状态
+- 服务端：/kb/kb-admin/pipeline/*（X-KB-Admin-Token）：
+  jobs 增查 / preview / approve / reconcile-preview / stats / ui；
+  任务以子进程执行，进度实时写 kb_pipeline_home/pipeline.sqlite3
+- 前端（yj-crm-kb 46b015e，已 build+deploy）：侧栏新增
+  「知识库·增量更新」「知识库·从零重建」两个入口，打开
+  /kb/kb-admin/pipeline/ui?mode=...（单文件操作页：两个入口卡片、
+  步骤进度、复核勾选表、版本号+发布、对账预览）
+
+## 数据迁移（服务器 kb_pipeline_home/）
+
+- registry.sqlite3 ← cleaner .state（326 active / 619 retired / 26 superseded）
+- cache/embeddings_cache.jsonl ← singleton_dedup_embeddings_cache（33MB）
+- video/ ← video_route.jsonl + video_linkage_v2 内容（规范名）
+- output/kb_entries_official_v4.jsonl（空 registry 时 bootstrap 兜底）
+- sources 已种子化：364 文件（含 0 消息便签）
+
+## 验证记录（服务器实跑）
+
+- 增量干跑：changed=0 / slices=0（全部已登记，符合预期）
+- 重建干跑：364 文件 → 3606 切片（与冻结链一致）
+- reconcile-preview：remote 1.1.1 vs registry 全等（无差异）
+- UI 经 nginx 可达（401=令牌门禁生效），前端包已含新入口
+
+## 待办 / 注意
+
+- 真实增量 LLM 跑批与真实重建由人工在 UI 触发（消耗额度）
+- cleaner 本仓库转为只读归档（历史审计链 + 01~67 旧脚本在 git）；
+  若需从零重建能力的本地副本，从 yj-kb 仓库取
+- kb-admin 与流水线共用 cleaner_releases；流水线发布版本号取
+  current+1，两者天然错开；待发布修订存在时流水线发布被闸
