@@ -1,0 +1,32 @@
+{
+  "chunk_count": 326,
+  "embedding": {
+    "artifact": "external_regenerable",
+    "dimension": 2048,
+    "model": "embedding-3"
+  },
+  "files": {
+    "changelog.json": {
+      "sha256": "a201c6b74b4539f30d489d87ea05891217b76e708d21779258d2c363ed5f6d26"
+    },
+    "chunks.jsonl": {
+      "sha256": "3ed4b5539d75dbd6cc1fb8c902f53a0b6c62be4182f292b9ec3cbbcd1ac5e987"
+    }
+  },
+  "generated_at": "2026-09-20T12:11:10Z",
+  "release_version": "1.1.1",
+  "schema_version": "1.0.0",
+  "source_commit": "4bf52aceda7b2679c1021628dc194cb0a912dcd4",
+  "video": {
+    "files": {
+      "video_linkage.jsonl": {
+        "sha256": "0820141d29cd8f49d40928f261390ab28a4e9ba897b25e3a472da1673e0724ef"
+      },
+      "video_route.jsonl": {
+        "sha256": "905391d8cecb813e3fa9d342a5b7b2a8a3949e67b2874ca6276a6496bbe09d93"
+      }
+    },
+    "linkage_count": 9,
+    "route_count": 154
+  }
+}
